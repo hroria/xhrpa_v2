@@ -2,30 +2,25 @@ import streamlit as st
 import cv2
 import mediapipe as mp
 import numpy as np
-import matplotlib.pyplot as plt
-from collections import deque
-import tempfile
+from PIL import Image
 
-# === MediaPipe Setup ===
+# === Setup ===
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=False,
-                    model_complexity=1,
-                    enable_segmentation=False,
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5)
+pose = mp_pose.Pose()
+mp_drawing = mp.solutions.drawing_utils
 
-ANGLE_WEIGHTS = np.array([0.4, 0.4, 0.1, 0.1])
-
-# === Utility Functions ===
+# === Angle Calculation Utilities ===
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
-    ba, bc = a - b, c - b
-    cosine = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    ba = a - b
+    bc = c - b
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+    angle = np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
+    return angle
 
-def extract_angles(landmarks):
-    indices = mp_pose.PoseLandmark
+def extract_joint_angles(landmarks):
     try:
+        indices = mp_pose.PoseLandmark
         return [
             calculate_angle(landmarks[indices.LEFT_SHOULDER.value],
                             landmarks[indices.LEFT_ELBOW.value],
@@ -40,138 +35,46 @@ def extract_angles(landmarks):
                             landmarks[indices.RIGHT_KNEE.value],
                             landmarks[indices.RIGHT_ANKLE.value])
         ]
-    except:
+    except Exception as e:
         return None
 
-def weighted_distance(a1, a2, weights=ANGLE_WEIGHTS):
-    diff = np.array(a1) - np.array(a2)
-    return np.sqrt(np.sum((diff ** 2) * weights))
-
-def feedback_label(score, threshold):
-    if score < threshold:
-        return "✅ Good", (0, 255, 0)
-    elif score < threshold * 2:
-        return "⚠️ Okay", (0, 255, 255)
-    else:
-        return "❌ Poor", (0, 0, 255)
-
-def plot_live_chart(scores, threshold):
-    fig, ax = plt.subplots()
-    ax.plot(scores, label='Deviation', color='red')
-    ax.axhline(y=threshold, color='green', linestyle='--', label='Good')
-    ax.axhline(y=threshold * 2, color='orange', linestyle='--', label='Okay')
-    ax.axhline(y=threshold * 3, color='red', linestyle='--', label='Poor')
-    ax.set_ylim(0, max(threshold * 3.5, max(scores) if scores else 1))
-    ax.set_title("Live Pose Deviation")
-    ax.set_xlabel("Frame")
-    ax.set_ylabel("Deviation Score")
-    ax.legend()
-    st.pyplot(fig)
-
 # === Streamlit UI ===
-st.set_page_config(page_title="Pose Analysis", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="📱 Mobile Pose Analyzer", layout="centered")
 
-# Mobile-friendly layout styling
-st.markdown("""
-    <style>
-        .block-container {
-            max-width: 480px;
-            margin: auto;
-            padding: 1rem;
-        }
-        .phone-frame {
-            position: relative;
-            width: 360px;
-            height: 640px;
-            margin: auto;
-            border: 16px solid black;
-            border-radius: 36px;
-            background-color: #000;
-            box-shadow: 0 0 0 8px #888;
-            overflow: hidden;
-        }
-        .phone-screen {
-            width: 100%;
-            height: 100%;
-            background-color: white;
-        }
-    </style>
-""", unsafe_allow_html=True)
+st.title("📷 Mobile Pose Analyzer")
+st.write("Take a photo with your phone camera to analyze your posture.")
 
-st.title("📱 Pose Analysis in Phone Frame")
-st.write("Track your posture in real time using your camera. Optionally upload a reference video for comparison.")
+# === Camera Input ===
+image_data = st.camera_input("Capture your pose")
 
-# Reference pose (optional)
-ref_upload = st.file_uploader("Upload a reference pose video (optional)", type=["mp4"])
-ref_sequence = []
-if ref_upload:
-    temp_ref = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    temp_ref.write(ref_upload.read())
-    cap = cv2.VideoCapture(temp_ref.name)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = pose.process(rgb)
-        if result.pose_landmarks:
-            lm = [(l.x, l.y, l.z) for l in result.pose_landmarks.landmark]
-            angles = extract_angles(lm)
-            if angles:
-                ref_sequence.append(angles)
-    cap.release()
+if image_data:
+    image = Image.open(image_data)
+    frame = np.array(image)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-# Threshold calculation
-if ref_sequence:
-    diffs = [
-        weighted_distance(ref_sequence[i+1], ref_sequence[i])
-        for i in range(len(ref_sequence)-1)
-    ]
-    threshold = np.mean(diffs) + np.std(diffs)
-else:
-    threshold = 20  # fallback
+    results = pose.process(rgb)
 
-# Start camera
-if st.button("📷 Start Camera Analysis"):
-    st.markdown('<div class="phone-frame"><div class="phone-screen">', unsafe_allow_html=True)
-    stframe = st.empty()
-    st.markdown('</div></div>', unsafe_allow_html=True)
+    if results.pose_landmarks:
+        # Draw pose landmarks
+        mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+        st.image(frame, channels="RGB", caption="Detected Pose with Landmarks")
 
-    scores = deque(maxlen=50)
-    cap = cv2.VideoCapture(0)
+        # Extract and display angles
+        lm = [(l.x, l.y, l.z) for l in results.pose_landmarks.landmark]
+        joint_angles = extract_joint_angles(lm)
 
-    frame_idx = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose.process(rgb)
+        if joint_angles:
+            st.success("🎯 Detected Joint Angles")
+            st.write(f"**Left Arm Angle**: {joint_angles[0]:.1f}°")
+            st.write(f"**Right Arm Angle**: {joint_angles[1]:.1f}°")
+            st.write(f"**Left Leg Angle**: {joint_angles[2]:.1f}°")
+            st.write(f"**Right Leg Angle**: {joint_angles[3]:.1f}°")
 
-        feedback = "No Pose"
-        if results.pose_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-            lm = [(l.x, l.y, l.z) for l in results.pose_landmarks.landmark]
-            test_angles = extract_angles(lm)
-            if test_angles:
-                if ref_sequence:
-                    ref_idx = min(frame_idx, len(ref_sequence) - 1)
-                    score = weighted_distance(test_angles, ref_sequence[ref_idx])
-                else:
-                    score = sum(test_angles) / len(test_angles)
-
-                label, color = feedback_label(score, threshold)
-                feedback = f"{label} | Score: {score:.1f}"
-                scores.append(score)
-
-        # Draw feedback text
-        cv2.putText(frame, feedback, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color if 'color' in locals() else (0,0,0), 2)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        stframe.image(frame, channels="RGB")
-
-        frame_idx += 1
-        if len(scores) > 3:
-            st.subheader("📊 Live Deviation Score Chart")
-            plot_live_chart(list(scores), threshold)
-
-    cap.release()
+            if max(joint_angles) - min(joint_angles) < 30:
+                st.info("✅ Symmetrical form")
+            else:
+                st.warning("⚠️ Check for asymmetry between sides.")
+        else:
+            st.warning("Could not calculate joint angles.")
+    else:
+        st.error("No pose detected. Try improving lighting or body visibility.")
